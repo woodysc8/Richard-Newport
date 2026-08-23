@@ -10,7 +10,8 @@ export const runtime = "nodejs";
 type FinancialContextQuery = Record<string, string | undefined>;
 
 function hasValidMcpKey(request: NextRequest): boolean {
-  const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]
+    ?? request.nextUrl.searchParams.get("key");
   const expected = process.env.MCP_SERVER_API_KEY;
 
   if (!token || !expected || token.length !== expected.length) return false;
