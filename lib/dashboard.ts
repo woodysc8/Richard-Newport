@@ -11,11 +11,23 @@ export interface DashboardAccount {
   plaid_item_id?: string | null;
 }
 
-export function isDashboardInvestmentAccount(account: DashboardAccount): boolean {
+export type DashboardAccountClass = "cash" | "investment" | "retirement" | "credit" | "loan" | "other";
+
+export function getDashboardAccountClass(account: DashboardAccount): DashboardAccountClass {
   const type = (account.account_type ?? "").toLowerCase();
   const subtype = (account.account_subtype ?? "").toLowerCase();
 
-  return type === "investment" || subtype.includes("brokerage") || subtype.includes("investment");
+  if (type === "credit" || subtype.includes("credit")) return "credit";
+  if (type === "loan" || subtype.includes("loan")) return "loan";
+  if (subtype.includes("ira") || subtype.includes("401") || subtype.includes("retirement") || subtype.includes("pension")) return "retirement";
+  if (type === "investment" || subtype.includes("brokerage") || subtype.includes("investment")) return "investment";
+  if (type === "depository") return "cash";
+  return "other";
+}
+
+export function isDashboardInvestmentAccount(account: DashboardAccount): boolean {
+  const accountClass = getDashboardAccountClass(account);
+  return accountClass === "investment" || accountClass === "retirement";
 }
 
 export interface InvestmentHolding {
