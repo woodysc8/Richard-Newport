@@ -19,7 +19,7 @@ export function getDashboardAccountClass(account: DashboardAccount): DashboardAc
 
   if (type === "credit" || subtype.includes("credit")) return "credit";
   if (type === "loan" || subtype.includes("loan")) return "loan";
-  if (subtype.includes("ira") || subtype.includes("401") || subtype.includes("retirement") || subtype.includes("pension")) return "retirement";
+  if (subtype === "roth" || subtype.includes("ira") || subtype.includes("401") || subtype.includes("retirement") || subtype.includes("pension")) return "retirement";
   if (type === "investment" || subtype.includes("brokerage") || subtype.includes("investment")) return "investment";
   if (type === "depository") return "cash";
   return "other";
