@@ -601,7 +601,12 @@ export function summarizeAccounts(
     const isInvestment =
       accountType === "investment" ||
       subtype.includes("brokerage") ||
-      subtype.includes("investment");
+      subtype.includes("investment") ||
+      subtype.includes("roth") ||
+      subtype.includes("ira") ||
+      subtype.includes("401") ||
+      subtype.includes("retirement") ||
+      subtype.includes("pension");
 
     if (isCredit) {
       credit += balance;
