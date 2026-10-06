@@ -227,11 +227,15 @@ export async function getFinancialContext(
     if (error) {
       context.freshness.sourceStatuses.investmentSnapshots = "unavailable";
     } else {
-      context.investments.snapshots = ((snapshots ?? []) as Pick<InvestmentSnapshot, "snapshot_date" | "portfolio_value" | "created_at">[]).map((snapshot) => ({
-        date: snapshot.snapshot_date,
-        portfolioValue: snapshot.portfolio_value,
-        createdAt: snapshot.created_at,
-      }));
+      context.investments.snapshots = ((snapshots ?? []) as Pick<InvestmentSnapshot, "snapshot_date" | "portfolio_value" | "created_at">[]).flatMap((snapshot) => (
+        snapshot.portfolio_value == null
+          ? []
+          : [{
+              date: snapshot.snapshot_date,
+              portfolioValue: snapshot.portfolio_value,
+              createdAt: snapshot.created_at,
+            }]
+      ));
       context.freshness.sourceStatuses.investmentSnapshots = "available";
     }
   }
