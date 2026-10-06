@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { Configuration, PlaidApi } from "plaid";
+import { calculateSecuritiesOnlyValue } from "./investmentSnapshots";
 
 const FIXED_USER_ID = "4ac12929-b795-474e-9001-56190c6c4daf";
 
@@ -25,6 +26,7 @@ type StoredItem = {
   plaid_item_id: string;
   access_token: string;
   institution_name: string | null;
+  transactions_cursor: string | null;
 };
 
 export type ItemRefreshResult = {
@@ -41,6 +43,15 @@ export type ItemRefreshResult = {
   errors: string[];
   warnings: string[];
 };
+
+export type FinancialSyncResult = {
+  success: boolean;
+  status: "completed" | "in_progress";
+  items: ItemRefreshResult[];
+};
+
+const SYNC_LEASE_MS = 15 * 60 * 1000;
+let localRefresh: Promise<FinancialSyncResult> | null = null;
 
 function sanitizedError(error: unknown) {
   const responseData = (error as { response?: { data?: { error_code?: string; error_message?: string } } })?.response?.data;
@@ -75,7 +86,12 @@ function localSnapshotDate() {
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
-async function persistDailyInvestmentSnapshot(item: StoredItem, plaidAccountId: string, portfolioValue: number) {
+async function persistDailyInvestmentSnapshot(
+  item: StoredItem,
+  plaidAccountId: string,
+  portfolioValue: number | null,
+  securitiesValue: number
+) {
   const { error } = await supabase.from("investment_snapshots").upsert(
     {
       user_id: FIXED_USER_ID,
@@ -83,6 +99,7 @@ async function persistDailyInvestmentSnapshot(item: StoredItem, plaidAccountId: 
       plaid_account_id: plaidAccountId,
       snapshot_date: localSnapshotDate(),
       portfolio_value: portfolioValue,
+      securities_value: securitiesValue,
     },
     { onConflict: "user_id,plaid_account_id,snapshot_date" }
   );
@@ -91,7 +108,6 @@ async function persistDailyInvestmentSnapshot(item: StoredItem, plaidAccountId: 
 
 async function refreshAccounts(item: StoredItem, result: ItemRefreshResult) {
   const response = await plaidClient.accountsGet({ access_token: item.access_token });
-  const refreshedInvestmentAccounts: Array<{ plaidAccountId: string; portfolioValue: number }> = [];
   for (const account of response.data.accounts ?? []) {
     const { data: existing, error: lookupError } = await supabase
       .from("accounts")
@@ -124,21 +140,6 @@ async function refreshAccounts(item: StoredItem, result: ItemRefreshResult) {
       if (error) throw new Error(`Account insert failed: ${error.message}`);
       result.accounts_created += 1;
     }
-
-    const portfolioValue = account.balances.current;
-    if (isRobinhoodItem(item) && isInvestmentAccount(account) && typeof portfolioValue === "number" && Number.isFinite(portfolioValue) && portfolioValue > 0) {
-      refreshedInvestmentAccounts.push({ plaidAccountId: account.account_id, portfolioValue });
-    }
-  }
-
-  // Robinhood may return more than one investment-related account. The live
-  // portfolio account is the one with the usable portfolio balance, not an
-  // empty companion account. Persist exactly that account's daily snapshot.
-  const portfolioAccount = refreshedInvestmentAccounts.sort(
-    (left, right) => right.portfolioValue - left.portfolioValue
-  )[0];
-  if (portfolioAccount) {
-    await persistDailyInvestmentSnapshot(item, portfolioAccount.plaidAccountId, portfolioAccount.portfolioValue);
   }
 }
 
@@ -154,7 +155,18 @@ async function localAccountId(plaidAccountId: string | null | undefined) {
   return data?.id ?? null;
 }
 
-async function persistTransaction(transaction: any, result: ItemRefreshResult, mode: "added" | "modified") {
+type PlaidTransaction = {
+  account_id?: string | null;
+  transaction_id: string;
+  date: string;
+  name: string;
+  merchant_name?: string | null;
+  amount: number;
+  category?: string[] | string | null;
+  pending?: boolean;
+};
+
+async function persistTransaction(transaction: PlaidTransaction, result: ItemRefreshResult, mode: "added" | "modified") {
   const accountId = await localAccountId(transaction.account_id);
   const payload = {
     user_id: FIXED_USER_ID,
@@ -189,8 +201,10 @@ async function persistTransaction(transaction: any, result: ItemRefreshResult, m
 }
 
 async function refreshTransactions(item: StoredItem, result: ItemRefreshResult) {
-  // No durable cursor column exists in plaid_items yet. This is the required first-sync cursor.
-  let cursor = "";
+  // Plaid specifies an empty cursor only for the first sync.  Advance the
+  // stored cursor after every completely persisted page, so a retry can safely
+  // replay a page if persistence fails rather than skip transactions.
+  let cursor = item.transactions_cursor ?? "";
   let hasMore = true;
   while (hasMore) {
     const response = await plaidClient.transactionsSync({ access_token: item.access_token, cursor });
@@ -199,24 +213,31 @@ async function refreshTransactions(item: StoredItem, result: ItemRefreshResult) 
     for (const removed of response.data.removed ?? []) {
       const transactionId = removed.transaction_id;
       if (!transactionId) continue;
-      const { error } = await supabase
+      const { data: deleted, error } = await supabase
         .from("transactions")
         .delete()
         .eq("user_id", FIXED_USER_ID)
-        .eq("plaid_transaction_id", transactionId);
+        .eq("plaid_transaction_id", transactionId)
+        .select("id");
       if (error) throw new Error(`Transaction delete failed: ${error.message}`);
-      result.transactions_removed += 1;
+      result.transactions_removed += deleted?.length ?? 0;
     }
-    cursor = response.data.next_cursor;
+    const nextCursor = response.data.next_cursor;
+    const { error: cursorError } = await supabase
+      .from("plaid_items")
+      .update({ transactions_cursor: nextCursor, updated_at: new Date().toISOString() })
+      .eq("user_id", FIXED_USER_ID)
+      .eq("plaid_item_id", item.plaid_item_id);
+    if (cursorError) throw new Error(`Transaction cursor persistence failed: ${cursorError.message}`);
+    cursor = nextCursor;
     hasMore = response.data.has_more;
   }
-  result.warnings.push("Transaction cursor persistence is unavailable until plaid_items has a cursor column.");
 }
 
 async function refreshHoldings(item: StoredItem, result: ItemRefreshResult) {
   const { data: itemAccounts, error: itemAccountsError } = await supabase
     .from("accounts")
-    .select("account_type, account_subtype")
+    .select("plaid_account_id, account_type, account_subtype, current_balance")
     .eq("user_id", FIXED_USER_ID)
     .eq("plaid_item_id", item.plaid_item_id);
   if (itemAccountsError) throw new Error(`Investment account lookup failed: ${itemAccountsError.message}`);
@@ -242,11 +263,20 @@ async function refreshHoldings(item: StoredItem, result: ItemRefreshResult) {
 
   const securities = new Map((response.data.securities ?? []).map((security) => [security.security_id, security]));
   const currentKeys = new Set<string>();
+  const securitiesByAccount = new Map<string, Array<{ tickerSymbol?: string | null; securityName?: string | null; currency?: string | null; value: number | string | null }>>();
   for (const holding of response.data.holdings ?? []) {
     if (!holding.account_id || !holding.security_id) continue;
     const security = securities.get(holding.security_id);
     const key = `${holding.account_id}:${holding.security_id}`;
     currentKeys.add(key);
+    const accountAssets = securitiesByAccount.get(holding.account_id) ?? [];
+    accountAssets.push({
+      tickerSymbol: security?.ticker_symbol ?? null,
+      securityName: security?.name ?? null,
+      currency: security?.iso_currency_code ?? holding.iso_currency_code ?? null,
+      value: holding.institution_value ?? null,
+    });
+    securitiesByAccount.set(holding.account_id, accountAssets);
     const { data: existing, error: lookupError } = await supabase
       .from("investment_holdings")
       .select("id")
@@ -290,6 +320,18 @@ async function refreshHoldings(item: StoredItem, result: ItemRefreshResult) {
     if (error) throw new Error(`Stale holding removal failed: ${error.message}`);
     result.holdings_removed += 1;
   }
+
+  if (isRobinhoodItem(item)) {
+    for (const account of itemAccounts ?? []) {
+      if (!account.plaid_account_id || !isInvestmentAccount({ type: account.account_type, subtype: account.account_subtype })) continue;
+      await persistDailyInvestmentSnapshot(
+        item,
+        account.plaid_account_id,
+        typeof account.current_balance === "number" && Number.isFinite(account.current_balance) ? account.current_balance : null,
+        calculateSecuritiesOnlyValue(securitiesByAccount.get(account.plaid_account_id) ?? [])
+      );
+    }
+  }
 }
 
 async function refreshItem(item: StoredItem): Promise<ItemRefreshResult> {
@@ -320,13 +362,52 @@ async function refreshItem(item: StoredItem): Promise<ItemRefreshResult> {
   return result;
 }
 
-export async function refreshFinancialData() {
+async function acquireFinancialSyncLease() {
+  const token = crypto.randomUUID();
+  const staleBefore = new Date(Date.now() - SYNC_LEASE_MS).toISOString();
+  const { data, error } = await supabase
+    .from("profiles")
+    .update({ plaid_sync_lock_token: token, plaid_sync_locked_at: new Date().toISOString() })
+    .eq("id", FIXED_USER_ID)
+    .or(`plaid_sync_lock_token.is.null,plaid_sync_locked_at.lt.${staleBefore}`)
+    .select("id")
+    .maybeSingle();
+  if (error) throw new Error(`Financial sync lock acquisition failed: ${error.message}`);
+  return data ? token : null;
+}
+
+async function releaseFinancialSyncLease(token: string) {
+  const { error } = await supabase
+    .from("profiles")
+    .update({ plaid_sync_lock_token: null, plaid_sync_locked_at: null })
+    .eq("id", FIXED_USER_ID)
+    .eq("plaid_sync_lock_token", token);
+  if (error) console.error("Financial sync lock release failed:", error.message);
+}
+
+async function runFinancialDataRefresh(): Promise<FinancialSyncResult> {
+  const token = await acquireFinancialSyncLease();
+  if (!token) return { success: true, status: "in_progress", items: [] };
+  try {
   const { data, error } = await supabase
     .from("plaid_items")
-    .select("plaid_item_id, access_token, institution_name")
+    .select("plaid_item_id, access_token, institution_name, transactions_cursor")
     .eq("user_id", FIXED_USER_ID);
   if (error) throw new Error(`Plaid Item lookup failed: ${error.message}`);
   const items = (data ?? []) as StoredItem[];
   const results = await Promise.all(items.map(refreshItem));
-  return { success: results.every((item) => item.status === "success"), items: results };
+  return { success: results.every((item) => item.status === "success"), status: "completed", items: results };
+  } finally {
+    await releaseFinancialSyncLease(token);
+  }
+}
+
+// The shared background-sync entry point.  Duplicate in-process callers join
+// the same work; the database lease also protects separate server instances.
+export function refreshFinancialData(): Promise<FinancialSyncResult> {
+  if (localRefresh) return localRefresh;
+  localRefresh = runFinancialDataRefresh().finally(() => {
+    localRefresh = null;
+  });
+  return localRefresh;
 }

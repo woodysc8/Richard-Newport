@@ -22,7 +22,14 @@ describe("getAccountPurpose", () => {
     expect(getAccountPurpose(account({ institution_name: "USAA", account_name: "Checking" }))).toBe("spending");
     expect(getAccountPurpose(account({ institution_name: "Venmo", account_name: "Venmo balance" }))).toBe("venmo");
     expect(getAccountPurpose(account({ account_type: "credit", account_subtype: "credit card" }))).toBe("credit");
+    expect(getAccountPurpose(account({ institution_name: "Bilt", account_type: "depository", account_subtype: "checking" }))).toBe("credit");
+    expect(getAccountPurpose(account({ institution_name: "Barclays", account_type: "depository", account_subtype: "checking" }))).toBe("credit");
     expect(getAccountPurpose(account({ institution_name: "Robinhood", account_name: "Bills HYSA", account_type: "depository", account_subtype: "savings" }))).toBe("hysa");
+  });
+
+  it("keeps Robinhood Crypto out of equities", () => {
+    expect(getAccountPurpose(account({ institution_name: "Robinhood", account_name: "Crypto", account_type: "investment", account_subtype: "crypto" }))).toBe("other");
+    expect(getAccountPurpose(account({ institution_name: "Other broker", account_name: "Brokerage", account_type: "investment", account_subtype: "brokerage" }))).toBe("other");
   });
 
   it("maps real account IDs without using them for classification", () => {

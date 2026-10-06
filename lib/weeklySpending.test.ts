@@ -72,6 +72,15 @@ describe("calculateWeeklySpending", () => {
     expect(withVenmo.eligibleSpending).toBe(withoutVenmo.eligibleSpending);
   });
 
+  it("subtracts a qualifying posted incoming Venmo reimbursement", () => {
+    const result = calculate([
+      transaction({ amount: 250 }),
+      transaction({ amount: -25, merchant_name: "Venmo", name: "Venmo payment", pending: false }),
+    ]);
+
+    expect(result.eligibleSpending).toBe(225);
+  });
+
   it("applies refunds as a reduction when classification identifies them", () => {
     const result = calculate([
       transaction({ amount: 250 }),

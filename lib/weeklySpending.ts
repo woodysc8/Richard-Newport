@@ -1,3 +1,4 @@
+import { isIncomingVenmoDiningReimbursement } from "./accounting";
 import { classifyTransaction, FinancialType } from "./classifyTransaction";
 import { getSpendingPeriod, getWeeklySpendingTarget, DateInput } from "./financialPlan";
 
@@ -55,6 +56,12 @@ export function calculateWeeklySpending({ asOf, transactions, venmoBalance }: We
 
   for (const transaction of transactions) {
     if (transaction.date < period.start || transaction.date > period.end) {
+      continue;
+    }
+
+    if (isIncomingVenmoDiningReimbursement(transaction)) {
+      eligibleSpending -= Math.abs(amountOf(transaction));
+      transactionCount += 1;
       continue;
     }
 

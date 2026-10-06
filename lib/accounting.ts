@@ -166,7 +166,7 @@ function isTransfer(tx: any): boolean {
   );
 }
 
-type VenmoTransaction = {
+export type VenmoTransaction = {
   amount?: unknown;
   pending?: boolean | null;
   merchant_name?: unknown;
@@ -178,7 +178,7 @@ function isVenmoP2P(tx: VenmoTransaction): boolean {
   return getTransactionText(tx).includes("venmo");
 }
 
-function isIncomingVenmoDiningReimbursement(tx: VenmoTransaction): boolean {
+export function isIncomingVenmoDiningReimbursement(tx: VenmoTransaction): boolean {
   const amount = toNumber(tx?.amount);
 
   return (

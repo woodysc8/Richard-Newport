@@ -1,4 +1,5 @@
 import accounting, { DashboardBudgetCategoryTotal, MonthlyAccounting } from "./accounting";
+import { FinancialAccountPurpose, getAccountPurpose } from "./accountPurpose";
 import {
   DashboardAccount,
   DashboardAccountClass,
@@ -7,6 +8,13 @@ import {
   RecentTransaction,
   getDashboardAccountClass,
 } from "./dashboard";
+import {
+  FINANCIAL_PLAN,
+  getCurrentOrNextPlannedPaycheck,
+  getPaycheckAllocation,
+} from "./financialPlan";
+import { calculateWeeklySpending, WeeklySpendingResult } from "./weeklySpending";
+import { isCashEquivalentAsset } from "./investmentSnapshots";
 
 export const DASHBOARD_TARGETS = {
   projectedMonthlyIncome: 4300,
@@ -16,6 +24,34 @@ export const DASHBOARD_TARGETS = {
 } as const;
 
 export type AccountWithClass = DashboardAccount & { accountClass: DashboardAccountClass };
+
+export type PortfolioHolding = InvestmentHolding & {
+  gain: number | null;
+  gainPercent: number | null;
+  allocationPercent: number | null;
+};
+
+export type PortfolioPosition = {
+  accounts: AccountWithClass[];
+  currentValue: number;
+  investedValue: number;
+  cashValue: number;
+  holdings: PortfolioHolding[];
+  totalGain: number | null;
+  totalGainPercent: number | null;
+};
+
+export type PortfolioGrowthObservation = {
+  date: string;
+  value: number;
+};
+
+export type PortfolioGrowthSeries = {
+  observations: PortfolioGrowthObservation[];
+  earliestValue: number | null;
+  latestValue: number | null;
+  changeSinceFirstSnapshot: number | null;
+};
 
 export type DashboardViewModel = {
   accountSummary: ReturnType<typeof accounting.summarizeAccounts>;
@@ -39,6 +75,29 @@ export type DashboardViewModel = {
     sevenDayReturnPercent: number | null;
     ytdReturn: number | null;
     ytdReturnPercent: number | null;
+  };
+  portfolioGrowth: PortfolioGrowthSeries;
+  overallPosition: {
+    netWorth: number;
+    checkingAccounts: AccountWithClass[];
+    checkingBalance: number;
+  };
+  financialPosition: {
+    equities: PortfolioPosition;
+    retirement: PortfolioPosition;
+    hysa: {
+      accounts: AccountWithClass[];
+      currentBalance: number;
+      configuredApy: number;
+    };
+  };
+  weeklySpending: WeeklySpendingResult;
+  financialPlan: {
+    paycheck: ReturnType<typeof getPaycheckAllocation>;
+    nextPaycheck: ReturnType<typeof getCurrentOrNextPlannedPaycheck>;
+    rothRemaining: number;
+    rothContributions: typeof FINANCIAL_PLAN.roth.contributions;
+    bills: typeof FINANCIAL_PLAN.bills;
   };
 };
 
@@ -110,12 +169,113 @@ function getInvestmentPerformance(holdings: InvestmentHolding[], snapshots: Inve
   };
 }
 
+function numericBalance(value: number | string | null): number {
+  return numberOrNull(value) ?? 0;
+}
+
+function sumBalances(accounts: DashboardAccount[]): number {
+  return accounts.reduce((total, account) => total + numericBalance(account.current_balance), 0);
+}
+
+function getPurpose(account: DashboardAccount): FinancialAccountPurpose {
+  return getAccountPurpose(account);
+}
+
+export function isCashHolding(holding: InvestmentHolding): boolean {
+  return isCashEquivalentAsset({
+    tickerSymbol: holding.ticker_symbol,
+    securityName: holding.security_name,
+    currency: holding.currency ?? holding.iso_currency_code,
+    value: holding.institution_value,
+  });
+}
+
+export function buildPortfolioGrowthSeries(
+  snapshots: InvestmentSnapshot[],
+  accounts: DashboardAccount[]
+): PortfolioGrowthSeries {
+  const eligibleAccountIds = new Set(
+    accounts
+      .filter((account) => {
+        const purpose = getPurpose(account);
+        return purpose === "equities" || purpose === "retirement";
+      })
+      .map((account) => account.plaid_account_id)
+      .filter((id): id is string => Boolean(id))
+  );
+  const valuesByDate = new Map<string, Map<string, number>>();
+
+  for (const snapshot of snapshots) {
+    if (!eligibleAccountIds.has(snapshot.plaid_account_id)) continue;
+    const value = numberOrNull(snapshot.securities_value);
+    if (value == null) continue;
+    const accountValues = valuesByDate.get(snapshot.snapshot_date) ?? new Map<string, number>();
+    accountValues.set(snapshot.plaid_account_id, (accountValues.get(snapshot.plaid_account_id) ?? 0) + value);
+    valuesByDate.set(snapshot.snapshot_date, accountValues);
+  }
+
+  const observations = Array.from(valuesByDate.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([date, accountValues]) => ({
+      date,
+      value: Array.from(accountValues.values()).reduce((total, value) => total + value, 0),
+    }));
+  const earliestValue = observations[0]?.value ?? null;
+  const latestValue = observations.at(-1)?.value ?? null;
+
+  return {
+    observations,
+    earliestValue,
+    latestValue,
+    changeSinceFirstSnapshot: earliestValue != null && latestValue != null ? latestValue - earliestValue : null,
+  };
+}
+
+function buildPortfolioPosition(
+  accounts: AccountWithClass[],
+  holdings: InvestmentHolding[],
+  purpose: "equities" | "retirement"
+): PortfolioPosition {
+  const purposeAccounts = accounts.filter((account) => getPurpose(account) === purpose);
+  const purposePlaidIds = new Set(
+    purposeAccounts.map((account) => account.plaid_account_id).filter((id): id is string => Boolean(id))
+  );
+  const purposeHoldings = holdings.filter((holding) => purposePlaidIds.has(holding.plaid_account_id) && !isCashHolding(holding));
+  const currentValue = sumBalances(purposeAccounts);
+  const investedValue = purposeHoldings.reduce((total, holding) => total + numericBalance(holding.institution_value), 0);
+  const holdingsWithMetrics = purposeHoldings.map((holding) => {
+    const value = numberOrNull(holding.institution_value);
+    const costBasis = numberOrNull(holding.cost_basis);
+    const gain = value != null && costBasis != null ? value - costBasis : null;
+    return {
+      ...holding,
+      gain,
+      gainPercent: gain != null && costBasis != null && costBasis > 0 ? (gain / costBasis) * 100 : null,
+      allocationPercent: investedValue > 0 && value != null ? (value / investedValue) * 100 : null,
+    };
+  });
+  const knownGains = holdingsWithMetrics.filter((holding) => holding.gain != null);
+  const totalGain = knownGains.length > 0 ? knownGains.reduce((total, holding) => total + (holding.gain ?? 0), 0) : null;
+  const totalCostBasis = purposeHoldings.reduce((total, holding) => total + (numberOrNull(holding.cost_basis) ?? 0), 0);
+
+  return {
+    accounts: purposeAccounts,
+    currentValue,
+    investedValue,
+    cashValue: Math.max(0, currentValue - investedValue),
+    holdings: holdingsWithMetrics,
+    totalGain,
+    totalGainPercent: totalGain != null && totalCostBasis > 0 ? (totalGain / totalCostBasis) * 100 : null,
+  };
+}
+
 export function buildDashboardViewModel({
   accounts,
   monthTransactions,
   historicalTransactions,
   holdings,
   snapshots,
+  weeklyTransactions = [],
   now = new Date(),
 }: {
   accounts: DashboardAccount[];
@@ -123,6 +283,7 @@ export function buildDashboardViewModel({
   historicalTransactions: RecentTransaction[];
   holdings: InvestmentHolding[];
   snapshots: InvestmentSnapshot[];
+  weeklyTransactions?: RecentTransaction[];
   now?: Date;
 }): DashboardViewModel {
   const accountsWithClass = accounts.map((account) => ({ ...account, accountClass: getDashboardAccountClass(account) }));
@@ -138,6 +299,13 @@ export function buildDashboardViewModel({
   const dayOfMonth = now.getDate();
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const projectedMonthEndSpending = dayOfMonth >= 2 ? (monthly.spending / dayOfMonth) * daysInMonth : null;
+  const hysaAccounts = accountsWithClass.filter((account) => getPurpose(account) === "hysa");
+  const checkingAccounts = accountsWithClass.filter((account) => getPurpose(account) === "spending");
+  const venmoBalance = accountsWithClass
+    .filter((account) => getPurpose(account) === "venmo")
+    .reduce((total, account) => total + numericBalance(account.current_balance), 0);
+  const equitiesPosition = buildPortfolioPosition(accountsWithClass, holdings, "equities");
+  const retirementPosition = buildPortfolioPosition(accountsWithClass, holdings, "retirement");
 
   return {
     accountSummary,
@@ -155,5 +323,32 @@ export function buildDashboardViewModel({
     projectedMonthEndSpending,
     monthlyHistory: monthlyHistory(historicalTransactions, accounts, now),
     investmentPerformance: getInvestmentPerformance(holdings, snapshots, now),
+    portfolioGrowth: buildPortfolioGrowthSeries(snapshots, accounts),
+    overallPosition: {
+      netWorth: accountSummary.netWorth,
+      checkingAccounts,
+      checkingBalance: sumBalances(checkingAccounts),
+    },
+    financialPosition: {
+      equities: equitiesPosition,
+      retirement: retirementPosition,
+      hysa: {
+        accounts: hysaAccounts,
+        currentBalance: sumBalances(hysaAccounts) + equitiesPosition.cashValue,
+        configuredApy: FINANCIAL_PLAN.bills.intendedApy,
+      },
+    },
+    weeklySpending: calculateWeeklySpending({
+      asOf: now,
+      transactions: weeklyTransactions,
+      venmoBalance,
+    }),
+    financialPlan: {
+      paycheck: getPaycheckAllocation(),
+      nextPaycheck: getCurrentOrNextPlannedPaycheck(now),
+      rothRemaining: FINANCIAL_PLAN.roth.totalRemaining,
+      rothContributions: FINANCIAL_PLAN.roth.contributions,
+      bills: FINANCIAL_PLAN.bills,
+    },
   };
 }

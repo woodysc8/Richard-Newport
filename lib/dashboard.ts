@@ -40,6 +40,8 @@ export interface InvestmentHolding {
   institution_price: number | string | null;
   institution_value: number | string | null;
   cost_basis: number | string | null;
+  currency?: string | null;
+  iso_currency_code?: string | null;
 }
 
 export interface InvestmentSnapshot {
@@ -47,7 +49,8 @@ export interface InvestmentSnapshot {
   plaid_item_id: string;
   plaid_account_id: string;
   snapshot_date: string;
-  portfolio_value: number | string;
+  portfolio_value: number | string | null;
+  securities_value?: number | string | null;
   created_at: string;
 }
 

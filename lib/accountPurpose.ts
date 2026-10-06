@@ -65,6 +65,14 @@ export function getAccountPurpose(account: AccountPurposeMetadata): FinancialAcc
     return "venmo";
   }
 
+  if (subtype.includes("crypto") || text.includes("crypto") || text.includes("cryptocurrency")) {
+    return "other";
+  }
+
+  if (institution.includes("bilt") || institution.includes("barclays") || text.includes("bilt card") || text.includes("barclays card")) {
+    return "credit";
+  }
+
   if (
     institution.includes("usaa") &&
     (subtype.includes("checking") || subtype.includes("cash") || type === "depository")
@@ -78,10 +86,7 @@ export function getAccountPurpose(account: AccountPurposeMetadata): FinancialAcc
 
   if (
     (institution.includes("robinhood") &&
-      (type === "investment" || subtype.includes("brokerage") || subtype.includes("individual") || subtype.includes("taxable"))) ||
-    subtype.includes("brokerage") ||
-    subtype.includes("taxable") ||
-    name.includes("individual brokerage")
+      (type === "investment" || subtype.includes("brokerage") || subtype.includes("individual") || subtype.includes("taxable") || name.includes("individual brokerage")))
   ) {
     return "equities";
   }
