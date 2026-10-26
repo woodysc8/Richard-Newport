@@ -53,11 +53,37 @@ export type FinancialSyncResult = {
 const SYNC_LEASE_MS = 15 * 60 * 1000;
 let localRefresh: Promise<FinancialSyncResult> | null = null;
 
-function sanitizedError(error: unknown) {
-  const responseData = (error as { response?: { data?: { error_code?: string; error_message?: string } } })?.response?.data;
-  const code = responseData?.error_code;
-  const message = responseData?.error_message;
-  return [code, message].filter(Boolean).join(": ") || "Plaid request failed";
+function formattedPlaidError(operation: string, error: unknown): string {
+  const candidate = (error !== null && typeof error === "object" ? error : {}) as {
+    message?: unknown;
+    status?: unknown;
+    response?: {
+      status?: unknown;
+      data?: {
+        error_code?: unknown;
+        error_type?: unknown;
+        error_message?: unknown;
+      };
+    };
+  };
+  const responseData = candidate.response?.data;
+  const status = typeof candidate.response?.status === "number"
+    ? candidate.response.status
+    : typeof candidate.status === "number"
+      ? candidate.status
+      : null;
+  const details = [
+    typeof responseData?.error_code === "string" ? responseData.error_code : null,
+    typeof responseData?.error_type === "string" ? responseData.error_type : null,
+    typeof responseData?.error_message === "string" ? responseData.error_message : null,
+  ].filter((detail): detail is string => detail != null);
+  const fallback = typeof candidate.message === "string"
+    ? candidate.message
+    : typeof error === "string"
+      ? error
+      : "Plaid request failed";
+
+  return `${operation} failed${status == null ? "" : ` (${status})`}: ${details.length > 0 ? details.join(" - ") : fallback}`;
 }
 
 function investmentsUnavailable(error: unknown) {
@@ -107,7 +133,12 @@ async function persistDailyInvestmentSnapshot(
 }
 
 async function refreshAccounts(item: StoredItem, result: ItemRefreshResult) {
-  const response = await plaidClient.accountsGet({ access_token: item.access_token });
+  let response;
+  try {
+    response = await plaidClient.accountsGet({ access_token: item.access_token });
+  } catch (error) {
+    throw new Error(formattedPlaidError("accountsGet", error));
+  }
   for (const account of response.data.accounts ?? []) {
     const { data: existing, error: lookupError } = await supabase
       .from("accounts")
@@ -207,7 +238,12 @@ async function refreshTransactions(item: StoredItem, result: ItemRefreshResult) 
   let cursor = item.transactions_cursor ?? "";
   let hasMore = true;
   while (hasMore) {
-    const response = await plaidClient.transactionsSync({ access_token: item.access_token, cursor });
+    let response;
+    try {
+      response = await plaidClient.transactionsSync({ access_token: item.access_token, cursor });
+    } catch (error) {
+      throw new Error(formattedPlaidError("transactionsSync", error));
+    }
     for (const transaction of response.data.added ?? []) await persistTransaction(transaction, result, "added");
     for (const transaction of response.data.modified ?? []) await persistTransaction(transaction, result, "modified");
     for (const removed of response.data.removed ?? []) {
@@ -258,7 +294,7 @@ async function refreshHoldings(item: StoredItem, result: ItemRefreshResult) {
       result.warnings.push("Investments are not available for this Item.");
       return;
     }
-    throw new Error(`Investment holdings refresh failed: ${sanitizedError(error)}`);
+    throw new Error(formattedPlaidError("investmentsHoldingsGet", error));
   }
 
   const securities = new Map((response.data.securities ?? []).map((security) => [security.security_id, security]));
